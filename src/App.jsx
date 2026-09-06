@@ -1,0 +1,564 @@
+import { useState, useRef } from "react";
+import { Calendar, Camera, Type, Plus, Check, X, Clock, MapPin, Loader2, Sparkles, ChevronLeft, Trash2, ImagePlus, ClipboardList, CalendarClock, Flower2 } from "lucide-react";
+
+const CATEGORY_STYLES = {
+  School: { dot: "bg-orange-700", text: "text-orange-800", bg: "bg-orange-100", border: "border-orange-700" },
+  Activity: { dot: "bg-amber-600", text: "text-amber-800", bg: "bg-amber-100", border: "border-amber-600" },
+  Reminder: { dot: "bg-emerald-700", text: "text-emerald-800", bg: "bg-emerald-100", border: "border-emerald-700" },
+  Other: { dot: "bg-stone-500", text: "text-stone-600", bg: "bg-stone-100", border: "border-stone-400" },
+};
+
+const NOTICE_CATEGORY_STYLES = {
+  Homework: { text: "text-red-800", bg: "bg-red-100", border: "border-red-700" },
+  "Permission Slip": { text: "text-orange-800", bg: "bg-orange-100", border: "border-orange-700" },
+  Info: { text: "text-emerald-800", bg: "bg-emerald-100", border: "border-emerald-700" },
+  Reminder: { text: "text-amber-800", bg: "bg-amber-100", border: "border-amber-600" },
+};
+
+const SAMPLE_EMAIL = `Subject: Reminder - Sports Day this Friday!
+
+Dear Parents,
+
+A quick reminder that Sports Day will be held this Friday from 9:30 AM to 1:00 PM on the main school ground. Please send your child in house colors (Red/Blue/Green/Yellow) and pack a water bottle.
+
+Also, Picture Day has been rescheduled to next Tuesday morning, 8:45 AM, in the school auditorium.
+
+Homework this week: Math worksheet pages 12-14 and a short reading log entry, due Monday. Please also sign and return the field trip permission slip by Wednesday.
+
+Thank you,
+Greenwood Primary School`;
+
+function todayISO() {
+  return new Date().toISOString().split("T")[0];
+}
+
+function formatDateLabel(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+
+  if (d.getTime() === today.getTime()) return "Today";
+  if (d.getTime() === tomorrow.getTime()) return "Tomorrow";
+  return d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function callClaude(contentBlocks) {
+  const systemNote = `Today's date is ${todayISO()}. Read the provided content (which may include multiple photos, e.g. several pages of a newsletter or a few separate flyers — treat them all as one source and de-duplicate anything referring to the same thing). Pull out two kinds of items:
+
+1. EVENTS — anything with a specific date/time to attend or do something (e.g. Sports Day, Picture Day, a school trip).
+2. NOTICES — anything informational that isn't itself a dated thing to attend: homework, permission slips, supply requests, general announcements, reminders to bring/send something, or any other detail a parent should remember. If in doubt about whether something is a notice, include it as one — it's better to surface it than miss it.
+
+Resolve relative dates ("this Friday", "next Tuesday", "due Monday") against today's date.
+
+Respond with ONLY a JSON array (no markdown, no prose). Each item must have a "type" field of "event" or "notice".
+
+Event shape: {"type": "event", "title": string, "date": "YYYY-MM-DD", "time": "HH:MM AM/PM or empty string", "location": string, "category": "School" | "Activity" | "Reminder" | "Other"}
+
+Notice shape: {"type": "notice", "title": string, "summary": string (one short sentence), "dueDate": "YYYY-MM-DD or empty string", "category": "Homework" | "Permission Slip" | "Info" | "Reminder"}
+
+If an event has no determinable date, omit it. Return every distinct event and notice you find.`;
+
+  const proxyUrl = (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_PROXY_URL) || "https://api.anthropic.com/v1/messages";
+
+  const response = await fetch(proxyUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1000,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: systemNote }, ...contentBlocks],
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json();
+  const text = (data.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  const parsed = JSON.parse(cleaned);
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+export default function SchoolCalendarApp() {
+  const [tab, setTab] = useState("agenda");
+  const [events, setEvents] = useState([]);
+  const [notices, setNotices] = useState([]);
+  const [mode, setMode] = useState("text");
+  const [pastedText, setPastedText] = useState("");
+  const [images, setImages] = useState([]); // [{ file, preview }]
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [drafts, setDrafts] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const resetCapture = () => {
+    setPastedText("");
+    setImages([]);
+    setDrafts(null);
+    setError("");
+  };
+
+  const handleImageSelect = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    const next = files.map((file) => ({ file, preview: URL.createObjectURL(file) }));
+    setImages((prev) => [...prev, ...next]);
+    e.target.value = "";
+  };
+
+  const removeImage = (index) => {
+    setImages((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleExtract = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      let blocks;
+      if (mode === "text") {
+        if (!pastedText.trim()) {
+          setError("Paste some email text first.");
+          setLoading(false);
+          return;
+        }
+        blocks = [{ type: "text", text: pastedText }];
+      } else {
+        if (!images.length) {
+          setError("Choose at least one photo first.");
+          setLoading(false);
+          return;
+        }
+        const imageBlocks = await Promise.all(
+          images.map(async ({ file }) => {
+            const base64 = await fileToBase64(file);
+            return { type: "image", source: { type: "base64", media_type: file.type || "image/jpeg", data: base64 } };
+          })
+        );
+        blocks = imageBlocks;
+      }
+      const results = await callClaude(blocks);
+      if (!results.length) {
+        setError("Couldn't find a clear event in that. Try adding more detail.");
+      } else {
+        setDrafts(results.map((r, i) => ({ ...r, _id: Date.now() + i })));
+      }
+    } catch (err) {
+      setError("Something went wrong reading that. Try again, or enter the event manually.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateDraft = (id, field, value) => {
+    setDrafts((prev) => prev.map((d) => (d._id === id ? { ...d, [field]: value } : d)));
+  };
+
+  const removeDraft = (id) => {
+    setDrafts((prev) => prev.filter((d) => d._id !== id));
+  };
+
+  const confirmDrafts = () => {
+    const newEvents = drafts.filter((d) => d.type !== "notice").map(({ _id, ...rest }) => ({ ...rest, id: Date.now() + Math.random() }));
+    const newNotices = drafts.filter((d) => d.type === "notice").map(({ _id, ...rest }) => ({ ...rest, id: Date.now() + Math.random() }));
+
+    if (newEvents.length) {
+      setEvents((prev) =>
+        [...prev, ...newEvents].sort((a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || "")))
+      );
+    }
+    if (newNotices.length) {
+      setNotices((prev) => [...newNotices, ...prev]);
+    }
+    resetCapture();
+    if (newNotices.length) {
+      setTab("notices");
+    } else {
+      setTab("agenda");
+    }
+  };
+
+  const deleteEvent = (id) => setEvents((prev) => prev.filter((e) => e.id !== id));
+  const deleteNotice = (id) => setNotices((prev) => prev.filter((n) => n.id !== id));
+
+  const grouped = events.reduce((acc, ev) => {
+    acc[ev.date] = acc[ev.date] || [];
+    acc[ev.date].push(ev);
+    return acc;
+  }, {});
+  const sortedDates = Object.keys(grouped).sort();
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-orange-50 via-amber-50 to-stone-50 flex justify-center">
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@1,600&family=Nunito:wght@400;600;700&display=swap'); .font-display{font-family:'Playfair Display',serif; font-style:italic;} .font-body{font-family:'Nunito',sans-serif;}`}</style>
+      <div className="w-full max-w-md font-body flex flex-col min-h-screen relative">
+        {/* Header */}
+        <div className="px-5 pt-6 pb-4 bg-gradient-to-b from-orange-50 to-orange-50/60 sticky top-0 z-10 border-b-2 border-dashed border-orange-200">
+          <div className="flex items-center gap-2">
+            <div className="bg-orange-700 text-orange-50 rounded-full p-1.5">
+              <Flower2 size={16} />
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-widest text-orange-700/70 font-semibold">
+                {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
+              </p>
+              <h1 className="font-display text-2xl text-orange-950 leading-tight">School Days</h1>
+            </div>
+          </div>
+        </div>
+
+        {/* Main content */}
+        <div className="flex-1 px-5 pt-4 pb-24 overflow-y-auto">
+          {tab === "agenda" && (
+            <div className="space-y-6">
+              {sortedDates.length === 0 && (
+                <div className="text-center py-16">
+                  <Calendar className="mx-auto text-orange-200" size={40} strokeWidth={1.5} />
+                  <p className="text-stone-500 mt-4 text-sm leading-relaxed">
+                    No events yet. Tap <span className="font-medium text-stone-700">Add</span> below to pull
+                    events and notices out of a school email or photo.
+                  </p>
+                </div>
+              )}
+              {sortedDates.map((date) => (
+                <div key={date}>
+                  <p className="text-sm font-semibold text-stone-700 mb-2">{formatDateLabel(date)}</p>
+                  <div className="space-y-2">
+                    {grouped[date].map((ev) => {
+                      const style = CATEGORY_STYLES[ev.category] || CATEGORY_STYLES.Other;
+                      return (
+                        <div key={ev.id} className={`bg-white rounded-2xl p-3.5 border-l-4 ${style.border} shadow-sm flex items-start gap-3`}>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium text-stone-800 text-sm">{ev.title}</p>
+                            <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1.5 text-xs text-stone-500">
+                              {ev.time && (
+                                <span className="flex items-center gap-1">
+                                  <Clock size={12} /> {ev.time}
+                                </span>
+                              )}
+                              {ev.location && (
+                                <span className="flex items-center gap-1">
+                                  <MapPin size={12} /> {ev.location}
+                                </span>
+                              )}
+                            </div>
+                            <span className={`inline-block mt-2 text-[11px] font-medium px-2 py-0.5 rounded-full ${style.bg} ${style.text}`}>
+                              {ev.category || "Other"}
+                            </span>
+                          </div>
+                          <button onClick={() => deleteEvent(ev.id)} className="text-orange-200 hover:text-rose-500 p-1">
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {tab === "notices" && (
+            <div className="space-y-2.5">
+              {notices.length === 0 && (
+                <div className="text-center py-16">
+                  <ClipboardList className="mx-auto text-orange-200" size={40} strokeWidth={1.5} />
+                  <p className="text-stone-500 mt-4 text-sm leading-relaxed">
+                    No notices yet. Homework, permission slips, and other info from school emails will show up
+                    here once you add them.
+                  </p>
+                </div>
+              )}
+              {notices.map((n) => {
+                const style = NOTICE_CATEGORY_STYLES[n.category] || NOTICE_CATEGORY_STYLES.Info;
+                return (
+                  <div key={n.id} className={`bg-white rounded-2xl p-3.5 border-l-4 ${style.border} shadow-sm flex items-start gap-3`}>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-stone-800 text-sm">{n.title}</p>
+                      {n.summary && <p className="text-xs text-stone-500 mt-1 leading-relaxed">{n.summary}</p>}
+                      <div className="flex items-center gap-2 mt-2">
+                        <span className={`inline-block text-[11px] font-medium px-2 py-0.5 rounded-full ${style.bg} ${style.text}`}>
+                          {n.category || "Info"}
+                        </span>
+                        {n.dueDate && (
+                          <span className="flex items-center gap-1 text-[11px] text-orange-300">
+                            <CalendarClock size={11} /> Due {formatDateLabel(n.dueDate)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <button onClick={() => deleteNotice(n.id)} className="text-orange-200 hover:text-rose-500 p-1">
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {tab === "add" && (
+            <div>
+              {!drafts && (
+                <>
+                  <div className="flex gap-2 mb-4">
+                    <button
+                      onClick={() => setMode("text")}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-medium border ${
+                        mode === "text" ? "bg-orange-700 text-white border-orange-700" : "bg-white text-stone-600 border-orange-100"
+                      }`}
+                    >
+                      <Type size={15} /> Paste text
+                    </button>
+                    <button
+                      onClick={() => setMode("photo")}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-medium border ${
+                        mode === "photo" ? "bg-orange-700 text-white border-orange-700" : "bg-white text-stone-600 border-orange-100"
+                      }`}
+                    >
+                      <Camera size={15} /> Upload photo
+                    </button>
+                  </div>
+
+                  {mode === "text" ? (
+                    <div>
+                      <textarea
+                        value={pastedText}
+                        onChange={(e) => setPastedText(e.target.value)}
+                        placeholder="Paste the school email here..."
+                        rows={8}
+                        className="w-full rounded-xl border border-orange-100 p-3 text-sm text-stone-700 focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none"
+                      />
+                      {!pastedText && (
+                        <button
+                          onClick={() => setPastedText(SAMPLE_EMAIL)}
+                          className="text-xs text-teal-700 mt-2 underline underline-offset-2"
+                        >
+                          Try a sample email
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        onChange={handleImageSelect}
+                        className="hidden"
+                      />
+                      {images.length > 0 ? (
+                        <div>
+                          <div className="grid grid-cols-3 gap-2">
+                            {images.map((img, i) => (
+                              <div key={img.preview} className="relative aspect-square">
+                                <img src={img.preview} alt={`Page ${i + 1}`} className="w-full h-full object-cover rounded-xl border border-orange-100" />
+                                <button
+                                  onClick={() => removeImage(i)}
+                                  className="absolute -top-1.5 -right-1.5 bg-orange-700 text-white rounded-full p-0.5 shadow"
+                                >
+                                  <X size={12} />
+                                </button>
+                                <span className="absolute bottom-1 left-1 bg-black/50 text-white text-[10px] px-1.5 rounded">
+                                  {i + 1}
+                                </span>
+                              </div>
+                            ))}
+                            <button
+                              onClick={() => fileInputRef.current?.click()}
+                              className="aspect-square border-2 border-dashed border-orange-200 rounded-xl flex flex-col items-center justify-center gap-1 text-orange-300"
+                            >
+                              <ImagePlus size={18} strokeWidth={1.5} />
+                              <span className="text-[10px]">Add more</span>
+                            </button>
+                          </div>
+                          <p className="text-xs text-orange-300 mt-2">
+                            {images.length} photo{images.length > 1 ? "s" : ""} selected — these'll be read together.
+                          </p>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          className="w-full border-2 border-dashed border-orange-200 rounded-xl py-10 flex flex-col items-center gap-2 text-orange-300"
+                        >
+                          <Camera size={24} strokeWidth={1.5} />
+                          <span className="text-sm">Tap to choose one or more photos</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {error && <p className="text-rose-600 text-xs mt-3">{error}</p>}
+
+                  <button
+                    onClick={handleExtract}
+                    disabled={loading}
+                    className="w-full mt-4 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white font-medium py-3 rounded-xl flex items-center justify-center gap-2 text-sm"
+                  >
+                    {loading ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                    {loading ? "Reading..." : "Extract"}
+                  </button>
+                </>
+              )}
+
+              {drafts && (
+                <div>
+                  <button onClick={resetCapture} className="flex items-center gap-1 text-sm text-stone-500 mb-3">
+                    <ChevronLeft size={16} /> Start over
+                  </button>
+                  <p className="text-sm text-stone-500 mb-3">Check the details before adding.</p>
+                  <div className="space-y-3">
+                    {drafts.map((d) => {
+                      const isNotice = d.type === "notice";
+                      return (
+                        <div key={d._id} className="bg-white rounded-2xl border border-orange-100 p-3.5 space-y-2.5">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className={`text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded ${isNotice ? "bg-red-50 text-red-700" : "bg-orange-50 text-orange-700"}`}>
+                              {isNotice ? "Notice" : "Event"}
+                            </span>
+                            <button onClick={() => removeDraft(d._id)} className="text-orange-200 hover:text-rose-500">
+                              <X size={16} />
+                            </button>
+                          </div>
+                          <input
+                            value={d.title || ""}
+                            onChange={(e) => updateDraft(d._id, "title", e.target.value)}
+                            className="font-medium text-sm text-stone-800 w-full border-b border-transparent focus:border-orange-200 focus:outline-none pb-0.5"
+                          />
+
+                          {isNotice ? (
+                            <>
+                              <textarea
+                                value={d.summary || ""}
+                                onChange={(e) => updateDraft(d._id, "summary", e.target.value)}
+                                placeholder="Summary"
+                                rows={2}
+                                className="w-full text-xs border border-orange-100 rounded-lg px-2 py-1.5 text-stone-600 resize-none"
+                              />
+                              <div className="flex gap-2 items-center">
+                                <label className="text-[11px] text-orange-300 whitespace-nowrap">Due date (optional)</label>
+                                <input
+                                  type="date"
+                                  value={d.dueDate || ""}
+                                  onChange={(e) => updateDraft(d._id, "dueDate", e.target.value)}
+                                  className="flex-1 text-xs border border-orange-100 rounded-lg px-2 py-1.5 text-stone-600"
+                                />
+                              </div>
+                              <select
+                                value={d.category || "Info"}
+                                onChange={(e) => updateDraft(d._id, "category", e.target.value)}
+                                className="w-full text-xs border border-orange-100 rounded-lg px-2 py-1.5 text-stone-600"
+                              >
+                                {Object.keys(NOTICE_CATEGORY_STYLES).map((c) => (
+                                  <option key={c} value={c}>
+                                    {c}
+                                  </option>
+                                ))}
+                              </select>
+                            </>
+                          ) : (
+                            <>
+                              <div className="flex gap-2">
+                                <input
+                                  type="date"
+                                  value={d.date || ""}
+                                  onChange={(e) => updateDraft(d._id, "date", e.target.value)}
+                                  className="flex-1 text-xs border border-orange-100 rounded-lg px-2 py-1.5 text-stone-600"
+                                />
+                                <input
+                                  type="text"
+                                  placeholder="Time"
+                                  value={d.time || ""}
+                                  onChange={(e) => updateDraft(d._id, "time", e.target.value)}
+                                  className="w-24 text-xs border border-orange-100 rounded-lg px-2 py-1.5 text-stone-600"
+                                />
+                              </div>
+                              <input
+                                type="text"
+                                placeholder="Location"
+                                value={d.location || ""}
+                                onChange={(e) => updateDraft(d._id, "location", e.target.value)}
+                                className="w-full text-xs border border-orange-100 rounded-lg px-2 py-1.5 text-stone-600"
+                              />
+                              <select
+                                value={d.category || "Other"}
+                                onChange={(e) => updateDraft(d._id, "category", e.target.value)}
+                                className="w-full text-xs border border-orange-100 rounded-lg px-2 py-1.5 text-stone-600"
+                              >
+                                {Object.keys(CATEGORY_STYLES).map((c) => (
+                                  <option key={c} value={c}>
+                                    {c}
+                                  </option>
+                                ))}
+                              </select>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {drafts.length > 0 && (
+                    <button
+                      onClick={confirmDrafts}
+                      className="w-full mt-4 bg-emerald-700 hover:bg-emerald-800 text-white font-medium py-3 rounded-xl flex items-center justify-center gap-2 text-sm"
+                    >
+                      <Check size={16} /> Add {drafts.length > 1 ? "all" : ""}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Bottom nav */}
+        <div className="fixed bottom-0 w-full max-w-md bg-orange-50/95 backdrop-blur border-t-2 border-dashed border-orange-200 flex px-2 py-2" style={{ paddingBottom: "max(0.5rem, env(safe-area-inset-bottom))" }}>
+          <button
+            onClick={() => setTab("agenda")}
+            className={`flex-1 flex flex-col items-center gap-0.5 py-1.5 rounded-xl text-xs font-medium ${
+              tab === "agenda" ? "text-orange-800 bg-orange-100" : "text-orange-300"
+            }`}
+          >
+            <Calendar size={20} strokeWidth={tab === "agenda" ? 2.2 : 1.8} />
+            Agenda
+          </button>
+          <button
+            onClick={() => setTab("notices")}
+            className={`flex-1 flex flex-col items-center gap-0.5 py-1.5 rounded-xl text-xs font-medium ${
+              tab === "notices" ? "text-orange-800 bg-orange-100" : "text-orange-300"
+            }`}
+          >
+            <ClipboardList size={20} strokeWidth={tab === "notices" ? 2.2 : 1.8} />
+            Notices
+          </button>
+          <button
+            onClick={() => setTab("add")}
+            className={`flex-1 flex flex-col items-center gap-0.5 py-1.5 rounded-xl text-xs font-medium ${
+              tab === "add" ? "text-orange-800 bg-orange-100" : "text-orange-300"
+            }`}
+          >
+            <Plus size={20} strokeWidth={tab === "add" ? 2.2 : 1.8} />
+            Add
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
