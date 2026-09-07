@@ -1,4 +1,4 @@
-# School Days — setup & push to GitHub
+ School Days — setup & push to GitHub
 
 This folder has your component (`src/App.jsx`), the GitHub Actions deploy workflow
 (`.github/workflows/deploy.yml`), and the Cloudflare Worker proxy (`cloudflare-worker.js`)

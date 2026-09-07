@@ -1,5 +1,140 @@
-import { useState, useRef } from "react";
-import { Calendar, Camera, Type, Plus, Check, X, Clock, MapPin, Loader2, Sparkles, ChevronLeft, Trash2, ImagePlus, ClipboardList, CalendarClock, Flower2 } from "lucide-react";
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Little Missy's Board (build: no-esm-v3)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<!--
+  HOW TO USE THIS FILE
+  ---------------------
+  1. Double-click this file (or serve it via a local server) to test the UI directly.
+  2. The calendar/notices/homework UI, drafts, editing, and navigation all work with no setup.
+  3. The "Extract" (AI) button calls Anthropic's API through your Cloudflare Worker. Set PROXY_URL
+     below to your own Worker's URL (see cloudflare-worker.js from our conversation).
+  4. Shared, persistent data via Firebase Firestore: set FIREBASE_PROJECT_ID below to your project ID.
+     Both this file and anyone else opening it with the same project ID will see the same data,
+     and it survives refreshes. Syncs every ~8 seconds (not instant).
+  5. This file uses plain global scripts (not ES modules) so it works reliably when opened directly
+     from your file system (file:// URLs don't support ES modules well in most browsers).
+-->
+
+<script>
+Babel.registerPreset("react-classic", () => ({
+  plugins: [[Babel.availablePlugins["transform-react-jsx"], { runtime: "classic" }]],
+}));
+</script>
+<script type="text/babel" data-presets="react-classic">
+const { useState, useRef, useEffect } = React;
+const { createRoot } = ReactDOM;
+
+// ---- Simple icon components (avoids needing an external icon package for this standalone file) ----
+const Emoji = ({ children, size = 20, className = "" }) => (
+  <span className={className} style={{ fontSize: size, lineHeight: 1, display: "inline-block" }}>{children}</span>
+);
+const Calendar = (p) => <Emoji {...p}>📅</Emoji>;
+const Camera = (p) => <Emoji {...p}>📷</Emoji>;
+const Type = (p) => <Emoji {...p}>📝</Emoji>;
+const Clock = (p) => <Emoji {...p}>🕐</Emoji>;
+const MapPin = (p) => <Emoji {...p}>📍</Emoji>;
+const Sparkles = (p) => <Emoji {...p}>✨</Emoji>;
+const Trash2 = (p) => <Emoji {...p}>🗑️</Emoji>;
+const ImagePlus = (p) => <Emoji {...p}>🖼️</Emoji>;
+const ClipboardList = (p) => <Emoji {...p}>📋</Emoji>;
+const CalendarClock = (p) => <Emoji {...p}>⏰</Emoji>;
+const Flower2 = (p) => <Emoji {...p}>🌸</Emoji>;
+
+function Loader2({ size = 16, className = "" }) {
+  return (
+    <span
+      className={`inline-block rounded-full border-2 border-current border-t-transparent animate-spin ${className}`}
+      style={{ width: size, height: size }}
+    />
+  );
+}
+function Plus({ size = 20, strokeWidth = 1.8, className = "" }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" className={className}>
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+function Check({ size = 20, strokeWidth = 1.8, className = "" }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+function X({ size = 20, strokeWidth = 1.8, className = "" }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" className={className}>
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+function ChevronLeft({ size = 20, strokeWidth = 1.8, className = "" }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polyline points="15 18 9 12 15 6" />
+    </svg>
+  );
+}
+function ChevronRight({ size = 20, strokeWidth = 1.8, className = "" }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
+  );
+}
+const BookOpen = (p) => <Emoji {...p}>📓</Emoji>;
+
+// ---- Set this to your Cloudflare Worker URL to enable the AI extraction feature outside Claude ----
+const PROXY_URL = "https://school-calendar-proxy.gayathri-shanbhag.workers.dev/"; // e.g. "https://your-worker-name.your-subdomain.workers.dev"
+
+// ---- Fill this in with your own Firebase project ID to enable shared, persistent sync ----
+const FIREBASE_PROJECT_ID = "little-missy-board";
+
+const FIRESTORE_DOC_URL = FIREBASE_PROJECT_ID
+  ? `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/family_data/board`
+  : null;
+
+async function loadSharedState() {
+  if (!FIRESTORE_DOC_URL) return null;
+  try {
+    const res = await fetch(FIRESTORE_DOC_URL);
+    if (!res.ok) return null;
+    const json = await res.json();
+    const raw = json?.fields?.data?.stringValue;
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function saveSharedState(events, notices, homeworkLog) {
+  if (!FIRESTORE_DOC_URL) return;
+  try {
+    await fetch(`${FIRESTORE_DOC_URL}?updateMask.fieldPaths=data`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fields: { data: { stringValue: JSON.stringify({ events, notices, homeworkLog }) } },
+      }),
+    });
+  } catch (e) {
+    // offline or not configured yet — data still works locally, just won't sync
+  }
+}
 
 const CATEGORY_STYLES = {
   School: { dot: "bg-orange-700", text: "text-orange-800", bg: "bg-orange-100", border: "border-orange-700" },
@@ -53,8 +188,26 @@ function fileToBase64(file) {
   });
 }
 
-async function callClaude(contentBlocks) {
-  const systemNote = `Today's date is ${todayISO()}. Read the provided content (which may include multiple photos, e.g. several pages of a newsletter or a few separate flyers — treat them all as one source and de-duplicate anything referring to the same thing). Pull out two kinds of items:
+function buildMonthMatrix(monthDate) {
+  const year = monthDate.getFullYear();
+  const month = monthDate.getMonth();
+  const startWeekday = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) {
+    cells.push({ day: d, iso: `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}` });
+  }
+  while (cells.length % 7 !== 0) cells.push(null);
+  const weeks = [];
+  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+  return weeks;
+}
+
+async function callClaude(contentBlocks, mode = "general") {
+  const homeworkNote = `Today's date is ${todayISO()}. Look at the provided homework material (a photo of a worksheet/assignment, or pasted text describing homework). Identify each distinct homework item. For each, write a short title (subject or worksheet name), a one-to-two sentence summary of what it involves, and figure out which specific day this homework is FOR — meaning the day it's due, or if no due date is stated, the day it was assigned/given (e.g. if it says "today's homework" or the photo appears to be from a specific day, use that; resolve relative phrases like "due Monday" or "for tomorrow" against today's date). If truly no date can be determined, use today's date. Respond with ONLY a JSON array of objects: {"title": string, "summary": string, "date": "YYYY-MM-DD"}. If only one homework item is present, return an array with a single object.`;
+
+  const generalNote = `Today's date is ${todayISO()}. Read the provided content (which may include multiple photos, e.g. several pages of a newsletter or a few separate flyers — treat them all as one source and de-duplicate anything referring to the same thing). Pull out two kinds of items:
 
 1. EVENTS — anything with a specific date/time to attend or do something (e.g. Sports Day, Picture Day, a school trip).
 2. NOTICES — anything informational that isn't itself a dated thing to attend: homework, permission slips, supply requests, general announcements, reminders to bring/send something, or any other detail a parent should remember. If in doubt about whether something is a notice, include it as one — it's better to surface it than miss it.
@@ -69,7 +222,11 @@ Notice shape: {"type": "notice", "title": string, "summary": string (one short s
 
 If an event has no determinable date, omit it. Return every distinct event and notice you find.`;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const systemNote = mode === "homework" ? homeworkNote : generalNote;
+
+  const claudeUrl = PROXY_URL || "https://api.anthropic.com/v1/messages";
+
+  const response = await fetch(claudeUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -100,17 +257,53 @@ If an event has no determinable date, omit it. Return every distinct event and n
   return Array.isArray(parsed) ? parsed : [parsed];
 }
 
-export default function SchoolCalendarApp() {
+function SchoolCalendarApp() {
   const [tab, setTab] = useState("agenda");
   const [events, setEvents] = useState([]);
   const [notices, setNotices] = useState([]);
+  const [homeworkLog, setHomeworkLog] = useState([]);
   const [mode, setMode] = useState("text");
   const [pastedText, setPastedText] = useState("");
   const [images, setImages] = useState([]); // [{ file, preview }]
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [drafts, setDrafts] = useState(null);
+  const [currentMonth, setCurrentMonth] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  });
+  const [selectedDate, setSelectedDate] = useState(todayISO());
   const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      const remote = await loadSharedState();
+      if (remote && !cancelled) {
+        setEvents(remote.events || []);
+        setNotices(remote.notices || []);
+        setHomeworkLog(remote.homeworkLog || []);
+      }
+    }
+    refresh();
+    const interval = setInterval(refresh, 8000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const persist = (nextEvents, nextNotices, nextHomework) => {
+    setEvents(nextEvents);
+    setNotices(nextNotices);
+    setHomeworkLog(nextHomework);
+    saveSharedState(nextEvents, nextNotices, nextHomework);
+  };
+
+  const goPrevMonth = () => setCurrentMonth((prev) => { const d = new Date(prev); d.setMonth(d.getMonth() - 1); return d; });
+  const goNextMonth = () => setCurrentMonth((prev) => { const d = new Date(prev); d.setMonth(d.getMonth() + 1); return d; });
 
   const resetCapture = () => {
     setPastedText("");
@@ -157,9 +350,19 @@ export default function SchoolCalendarApp() {
         );
         blocks = imageBlocks;
       }
-      const results = await callClaude(blocks);
+      const results = await callClaude(blocks, mode === "homework" ? "homework" : "general");
       if (!results.length) {
         setError("Couldn't find a clear event in that. Try adding more detail.");
+      } else if (mode === "homework") {
+        setDrafts(
+          results.map((r, i) => ({
+            type: "homework",
+            title: r.title || "",
+            summary: r.summary || "",
+            date: r.date || todayISO(),
+            _id: Date.now() + i,
+          }))
+        );
       } else {
         setDrafts(results.map((r, i) => ({ ...r, _id: Date.now() + i })));
       }
@@ -179,34 +382,37 @@ export default function SchoolCalendarApp() {
   };
 
   const confirmDrafts = () => {
-    const newEvents = drafts.filter((d) => d.type !== "notice").map(({ _id, ...rest }) => ({ ...rest, id: Date.now() + Math.random() }));
+    const newEvents = drafts.filter((d) => d.type === "event").map(({ _id, ...rest }) => ({ ...rest, id: Date.now() + Math.random() }));
     const newNotices = drafts.filter((d) => d.type === "notice").map(({ _id, ...rest }) => ({ ...rest, id: Date.now() + Math.random() }));
+    const newHomework = drafts.filter((d) => d.type === "homework").map(({ _id, ...rest }) => ({ ...rest, id: Date.now() + Math.random() }));
 
-    if (newEvents.length) {
-      setEvents((prev) =>
-        [...prev, ...newEvents].sort((a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || "")))
-      );
-    }
-    if (newNotices.length) {
-      setNotices((prev) => [...newNotices, ...prev]);
-    }
+    const updatedEvents = newEvents.length
+      ? [...events, ...newEvents].sort((a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || "")))
+      : events;
+    const updatedNotices = newNotices.length ? [...newNotices, ...notices] : notices;
+    const updatedHomework = newHomework.length ? [...newHomework, ...homeworkLog] : homeworkLog;
+
+    persist(updatedEvents, updatedNotices, updatedHomework);
+
     resetCapture();
-    if (newNotices.length) {
+    if (newHomework.length) {
+      setTab("homework");
+    } else if (newNotices.length) {
       setTab("notices");
     } else {
       setTab("agenda");
     }
   };
 
-  const deleteEvent = (id) => setEvents((prev) => prev.filter((e) => e.id !== id));
-  const deleteNotice = (id) => setNotices((prev) => prev.filter((n) => n.id !== id));
+  const deleteEvent = (id) => persist(events.filter((e) => e.id !== id), notices, homeworkLog);
+  const deleteNotice = (id) => persist(events, notices.filter((n) => n.id !== id), homeworkLog);
+  const deleteHomework = (id) => persist(events, notices, homeworkLog.filter((h) => h.id !== id));
 
   const grouped = events.reduce((acc, ev) => {
     acc[ev.date] = acc[ev.date] || [];
     acc[ev.date].push(ev);
     return acc;
   }, {});
-  const sortedDates = Object.keys(grouped).sort();
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-orange-50 via-amber-50 to-stone-50 flex justify-center">
@@ -222,7 +428,7 @@ export default function SchoolCalendarApp() {
               <p className="text-xs uppercase tracking-widest text-orange-700/70 font-semibold">
                 {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
               </p>
-              <h1 className="font-display text-2xl text-orange-950 leading-tight">School Days</h1>
+              <h1 className="font-body text-xl tracking-wide text-orange-950 leading-tight">Little Missy's Board</h1>
             </div>
           </div>
         </div>
@@ -230,51 +436,122 @@ export default function SchoolCalendarApp() {
         {/* Main content */}
         <div className="flex-1 px-5 pt-4 pb-24 overflow-y-auto">
           {tab === "agenda" && (
-            <div className="space-y-6">
-              {sortedDates.length === 0 && (
-                <div className="text-center py-16">
-                  <Calendar className="mx-auto text-orange-200" size={40} strokeWidth={1.5} />
-                  <p className="text-stone-500 mt-4 text-sm leading-relaxed">
-                    No events yet. Tap <span className="font-medium text-stone-700">Add</span> below to pull
-                    events and notices out of a school email or photo.
-                  </p>
-                </div>
-              )}
-              {sortedDates.map((date) => (
-                <div key={date}>
-                  <p className="text-sm font-semibold text-stone-700 mb-2">{formatDateLabel(date)}</p>
-                  <div className="space-y-2">
-                    {grouped[date].map((ev) => {
-                      const style = CATEGORY_STYLES[ev.category] || CATEGORY_STYLES.Other;
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <button onClick={goPrevMonth} className="p-1.5 rounded-full hover:bg-orange-100 text-orange-700">
+                  <ChevronLeft size={18} />
+                </button>
+                <p className="font-body text-lg text-orange-950 tracking-wide">
+                  {currentMonth.toLocaleDateString(undefined, { month: "long", year: "numeric" })}
+                </p>
+                <button onClick={goNextMonth} className="p-1.5 rounded-full hover:bg-orange-100 text-orange-700">
+                  <ChevronRight size={18} />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-7 gap-1 text-center text-[11px] text-orange-700/60 font-semibold mb-1">
+                {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => (
+                  <div key={d}>{d}</div>
+                ))}
+              </div>
+
+              <div className="space-y-1 mb-5">
+                {buildMonthMatrix(currentMonth).map((week, wi) => (
+                  <div key={wi} className="grid grid-cols-7 gap-1">
+                    {week.map((cell, ci) => {
+                      if (!cell) return <div key={ci} />;
+                      const isToday = cell.iso === todayISO();
+                      const isSelected = cell.iso === selectedDate;
+                      const dayEvents = grouped[cell.iso] || [];
+                      const dayHomework = homeworkLog.filter((h) => h.date === cell.iso);
                       return (
-                        <div key={ev.id} className={`bg-white rounded-2xl p-3.5 border-l-4 ${style.border} shadow-sm flex items-start gap-3`}>
-                          <div className="flex-1 min-w-0">
-                            <p className="font-medium text-stone-800 text-sm">{ev.title}</p>
-                            <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1.5 text-xs text-stone-500">
-                              {ev.time && (
-                                <span className="flex items-center gap-1">
-                                  <Clock size={12} /> {ev.time}
-                                </span>
+                        <button
+                          key={ci}
+                          onClick={() => setSelectedDate(cell.iso)}
+                          className={`aspect-square rounded-xl flex flex-col items-center justify-center text-xs relative ${
+                            isSelected
+                              ? "bg-orange-700 text-white font-semibold"
+                              : isToday
+                              ? "bg-orange-100 text-orange-800 font-semibold"
+                              : "text-stone-600 hover:bg-orange-50"
+                          }`}
+                        >
+                          {cell.day}
+                          {(dayEvents.length > 0 || dayHomework.length > 0) && (
+                            <span className="flex gap-0.5 mt-0.5">
+                              {dayEvents.slice(0, 2).map((ev, i) => (
+                                <span
+                                  key={`e${i}`}
+                                  className={`w-1 h-1 rounded-full ${
+                                    isSelected ? "bg-white" : (CATEGORY_STYLES[ev.category] || CATEGORY_STYLES.Other).dot
+                                  }`}
+                                />
+                              ))}
+                              {dayHomework.length > 0 && (
+                                <span className={`w-1 h-1 rounded-full ${isSelected ? "bg-white" : "bg-red-700"}`} />
                               )}
-                              {ev.location && (
-                                <span className="flex items-center gap-1">
-                                  <MapPin size={12} /> {ev.location}
-                                </span>
-                              )}
-                            </div>
-                            <span className={`inline-block mt-2 text-[11px] font-medium px-2 py-0.5 rounded-full ${style.bg} ${style.text}`}>
-                              {ev.category || "Other"}
                             </span>
-                          </div>
-                          <button onClick={() => deleteEvent(ev.id)} className="text-orange-200 hover:text-rose-500 p-1">
-                            <Trash2 size={15} />
-                          </button>
-                        </div>
+                          )}
+                        </button>
                       );
                     })}
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
+
+              <p className="text-sm font-semibold text-stone-700 mb-2">{formatDateLabel(selectedDate)}</p>
+              <div className="space-y-2">
+                {(grouped[selectedDate] || []).length === 0 && homeworkLog.filter((h) => h.date === selectedDate).length === 0 && (
+                  <div className="text-center py-10">
+                    <Calendar className="mx-auto text-orange-200" size={32} strokeWidth={1.5} />
+                    <p className="text-stone-500 mt-3 text-sm leading-relaxed">Nothing for this day yet.</p>
+                  </div>
+                )}
+                {(grouped[selectedDate] || []).map((ev) => {
+                  const style = CATEGORY_STYLES[ev.category] || CATEGORY_STYLES.Other;
+                  return (
+                    <div key={ev.id} className={`bg-white rounded-2xl p-3.5 border-l-4 ${style.border} shadow-sm flex items-start gap-3`}>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-stone-800 text-sm">{ev.title}</p>
+                        <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1.5 text-xs text-stone-500">
+                          {ev.time && (
+                            <span className="flex items-center gap-1">
+                              <Clock size={12} /> {ev.time}
+                            </span>
+                          )}
+                          {ev.location && (
+                            <span className="flex items-center gap-1">
+                              <MapPin size={12} /> {ev.location}
+                            </span>
+                          )}
+                        </div>
+                        <span className={`inline-block mt-2 text-[11px] font-medium px-2 py-0.5 rounded-full ${style.bg} ${style.text}`}>
+                          {ev.category || "Other"}
+                        </span>
+                      </div>
+                      <button onClick={() => deleteEvent(ev.id)} className="text-orange-200 hover:text-rose-500 p-1">
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  );
+                })}
+                {homeworkLog
+                  .filter((h) => h.date === selectedDate)
+                  .map((h) => (
+                    <div key={h.id} className="bg-white rounded-2xl p-3.5 border-l-4 border-red-700 shadow-sm flex items-start gap-3">
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-stone-800 text-sm">{h.title || "Homework"}</p>
+                        {h.summary && <p className="text-xs text-stone-500 mt-1 leading-relaxed">{h.summary}</p>}
+                        <span className="inline-block mt-2 text-[11px] font-medium px-2 py-0.5 rounded-full bg-red-50 text-red-700">
+                          Homework
+                        </span>
+                      </div>
+                      <button onClick={() => deleteHomework(h.id)} className="text-orange-200 hover:text-rose-500 p-1">
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  ))}
+              </div>
             </div>
           )}
 
@@ -316,26 +593,64 @@ export default function SchoolCalendarApp() {
             </div>
           )}
 
+          {tab === "homework" && (
+            <div className="space-y-2.5">
+              {homeworkLog.length === 0 && (
+                <div className="text-center py-16">
+                  <BookOpen className="mx-auto text-orange-200" size={40} strokeWidth={1.5} />
+                  <p className="text-stone-500 mt-4 text-sm leading-relaxed">
+                    No homework logged yet. Snap a photo of a worksheet or assignment under{" "}
+                    <span className="font-medium text-stone-700">Add</span> to start a log.
+                  </p>
+                </div>
+              )}
+              {[...homeworkLog]
+                .sort((a, b) => b.date.localeCompare(a.date))
+                .map((h) => (
+                  <div key={h.id} className="bg-white rounded-2xl p-3.5 border-l-4 border-red-700 shadow-sm flex items-start gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-stone-800 text-sm">{h.title || "Homework"}</p>
+                      {h.summary && <p className="text-xs text-stone-500 mt-1 leading-relaxed">{h.summary}</p>}
+                      <span className="inline-block mt-2 text-[11px] font-medium px-2 py-0.5 rounded-full bg-red-50 text-red-700">
+                        {formatDateLabel(h.date)}
+                      </span>
+                    </div>
+                    <button onClick={() => deleteHomework(h.id)} className="text-orange-200 hover:text-rose-500 p-1">
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
+
           {tab === "add" && (
             <div>
               {!drafts && (
                 <>
-                  <div className="flex gap-2 mb-4">
+                  <div className="flex gap-1.5 mb-4">
                     <button
                       onClick={() => setMode("text")}
-                      className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-medium border ${
+                      className={`flex-1 flex flex-col items-center justify-center gap-1 py-2 rounded-xl text-[11px] font-medium border ${
                         mode === "text" ? "bg-orange-700 text-white border-orange-700" : "bg-white text-stone-600 border-orange-100"
                       }`}
                     >
-                      <Type size={15} /> Paste text
+                      <Type size={14} /> Paste text
                     </button>
                     <button
                       onClick={() => setMode("photo")}
-                      className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-sm font-medium border ${
+                      className={`flex-1 flex flex-col items-center justify-center gap-1 py-2 rounded-xl text-[11px] font-medium border ${
                         mode === "photo" ? "bg-orange-700 text-white border-orange-700" : "bg-white text-stone-600 border-orange-100"
                       }`}
                     >
-                      <Camera size={15} /> Upload photo
+                      <Camera size={14} /> Upload photo
+                    </button>
+                    <button
+                      onClick={() => setMode("homework")}
+                      className={`flex-1 flex flex-col items-center justify-center gap-1 py-2 rounded-xl text-[11px] font-medium border ${
+                        mode === "homework" ? "bg-orange-700 text-white border-orange-700" : "bg-white text-stone-600 border-orange-100"
+                      }`}
+                    >
+                      <BookOpen size={14} /> Log homework
                     </button>
                   </div>
 
@@ -430,11 +745,16 @@ export default function SchoolCalendarApp() {
                   <div className="space-y-3">
                     {drafts.map((d) => {
                       const isNotice = d.type === "notice";
+                      const isHomework = d.type === "homework";
                       return (
                         <div key={d._id} className="bg-white rounded-2xl border border-orange-100 p-3.5 space-y-2.5">
                           <div className="flex items-start justify-between gap-2">
-                            <span className={`text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded ${isNotice ? "bg-red-50 text-red-700" : "bg-orange-50 text-orange-700"}`}>
-                              {isNotice ? "Notice" : "Event"}
+                            <span
+                              className={`text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                                isHomework ? "bg-red-50 text-red-700" : isNotice ? "bg-red-50 text-red-700" : "bg-orange-50 text-orange-700"
+                              }`}
+                            >
+                              {isHomework ? "Homework" : isNotice ? "Notice" : "Event"}
                             </span>
                             <button onClick={() => removeDraft(d._id)} className="text-orange-200 hover:text-rose-500">
                               <X size={16} />
@@ -446,7 +766,26 @@ export default function SchoolCalendarApp() {
                             className="font-medium text-sm text-stone-800 w-full border-b border-transparent focus:border-orange-200 focus:outline-none pb-0.5"
                           />
 
-                          {isNotice ? (
+                          {isHomework ? (
+                            <>
+                              <textarea
+                                value={d.summary || ""}
+                                onChange={(e) => updateDraft(d._id, "summary", e.target.value)}
+                                placeholder="Summary"
+                                rows={2}
+                                className="w-full text-xs border border-orange-100 rounded-lg px-2 py-1.5 text-stone-600 resize-none"
+                              />
+                              <div className="flex gap-2 items-center">
+                                <label className="text-[11px] text-orange-300 whitespace-nowrap">For date</label>
+                                <input
+                                  type="date"
+                                  value={d.date || ""}
+                                  onChange={(e) => updateDraft(d._id, "date", e.target.value)}
+                                  className="flex-1 text-xs border border-orange-100 rounded-lg px-2 py-1.5 text-stone-600"
+                                />
+                              </div>
+                            </>
+                          ) : isNotice ? (
                             <>
                               <textarea
                                 value={d.summary || ""}
@@ -540,7 +879,7 @@ export default function SchoolCalendarApp() {
             }`}
           >
             <Calendar size={20} strokeWidth={tab === "agenda" ? 2.2 : 1.8} />
-            Agenda
+            Calendar
           </button>
           <button
             onClick={() => setTab("notices")}
@@ -550,6 +889,15 @@ export default function SchoolCalendarApp() {
           >
             <ClipboardList size={20} strokeWidth={tab === "notices" ? 2.2 : 1.8} />
             Notices
+          </button>
+          <button
+            onClick={() => setTab("homework")}
+            className={`flex-1 flex flex-col items-center gap-0.5 py-1.5 rounded-xl text-xs font-medium ${
+              tab === "homework" ? "text-orange-800 bg-orange-100" : "text-orange-300"
+            }`}
+          >
+            <BookOpen size={20} strokeWidth={tab === "homework" ? 2.2 : 1.8} />
+            Homework
           </button>
           <button
             onClick={() => setTab("add")}
@@ -565,3 +913,9 @@ export default function SchoolCalendarApp() {
     </div>
   );
 }
+
+const root = createRoot(document.getElementById("root"));
+root.render(<SchoolCalendarApp />);
+</script>
+</body>
+</html>
