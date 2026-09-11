@@ -1,6 +1,6 @@
 # Little Missy's Board — Design Document
 
-**Version:** v4 (search + file upload)
+**Version:** v5 (authentication + persistent sessions)
 **Type:** Single-page web application (standalone HTML)
 **Status:** Deployed via GitHub Pages
 
@@ -26,7 +26,7 @@ Instead of manually typing calendar entries, the user pastes an email or photogr
 - Not a general-purpose calendar app (no recurring events, no multiple calendars, no invites).
 - Not a multi-family or multi-tenant product — one shared board per deployment.
 - Not real-time collaborative (no live cursors/presence) — sync is near-real-time via polling.
-- No user accounts or login — access is controlled only by who has the URL and (implicitly) the Firestore project ID.
+- Authentication is intentionally limited to email/password sign-in for the single shared family board; there are no roles, invitations, or multi-tenant account management features.
 
 ---
 
@@ -158,6 +158,14 @@ All state lives in a single top-level component (`SchoolCalendarApp`). No extern
 | `selectedDate` | string `YYYY-MM-DD` | The day currently selected/expanded below the calendar grid |
 | `searchOpen` | boolean | Whether the search input/overlay is visible |
 | `searchQuery` | string | Current search text |
+| `authToken` | string \| null | Short-lived Firebase ID token used for authenticated Firestore requests |
+| `authRefreshToken` | string \| null | Firebase refresh token used to obtain a new ID token when the current one expires |
+| `authEmail` | string | Email address of the signed-in user, shown in the header |
+| `keepSignedIn` | boolean | Whether the refresh token should survive page reloads and browser restarts |
+| `authRestoring` | boolean | Startup state while a saved session is being restored |
+| `loginEmail` / `loginPassword` | string | Sign-in form inputs; the password is cleared after successful sign-in |
+| `loginError` | string | Friendly sign-in error shown below the form |
+| `loginLoading` | boolean | Disables the sign-in button while authentication is in progress |
 | `fileInputRef` | ref | Hidden `<input type="file">` element reference |
 
 ---
@@ -217,6 +225,19 @@ This is the primary flow of the app, used identically for events/notices (genera
 - Tapping a result:
   - **Event or homework result:** calls `jumpToDate(date)`, which sets `currentMonth` to that entry's month, sets `selectedDate` to that exact day, switches to the Calendar tab, and closes search — landing the user exactly where that item lives.
   - **Notice result:** switches to the Notices tab (notices aren't date-anchored on the calendar) and closes search.
+
+### 5.5 Authentication and Session Flow
+
+Authentication is handled through Firebase Authentication's REST endpoints rather than the Firebase JavaScript SDK, preserving the standalone file's no-build and dependency-free runtime.
+
+1. On first load, the app checks `localStorage` for a saved session under `little-missy-board-auth`.
+2. If a refresh token is present, `refreshIdToken()` exchanges it with Firebase for a new short-lived ID token. The app shows a small loading state during this restoration so the sign-in form does not flash unnecessarily.
+3. If no valid saved session exists, the user sees the email/password sign-in form.
+4. The user can enable **Keep me signed in**. After a successful sign-in, the app stores the Firebase refresh token and email in `localStorage`; the password is never stored.
+5. If the option is disabled, any saved session is removed and the session lasts only in memory for the current page.
+6. The ID token is refreshed approximately every 50 minutes using the current refresh token. The rotated refresh token is written back to storage when persistent sign-in is enabled.
+7. Sign out clears the in-memory tokens, displayed email, and saved local session.
+8. The authenticated ID token is sent as a Bearer token on Firestore reads and writes.
 
 ---
 
@@ -314,7 +335,16 @@ No Firebase SDK is used — all communication is plain `fetch()` against Firesto
 
 The entire app state (`{ events, notices, homeworkLog }`) is serialized into **one** Firestore string field on **one** document, rather than modeled as separate typed Firestore documents/collections per entry. This trades Firestore's native querying/typing away in exchange for a drastically simpler client (one GET, one PATCH, no per-field type marshaling) — appropriate for a dataset this small (a single family's calendar).
 
-### 7.6 Deployment model
+### 7.6 Authentication (Firebase REST-only)
+
+The standalone app uses Firebase Authentication's REST API directly:
+
+- Sign-in: `POST https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={WEB_API_KEY}`.
+- Token refresh: `POST https://securetoken.googleapis.com/v1/token?key={WEB_API_KEY}` with `grant_type=refresh_token`.
+- The Firebase Web API key identifies the project but is not a password; access control comes from Firebase Authentication and Firestore security rules.
+- The refresh token is persisted only when the user chooses **Keep me signed in**. It is stored in browser `localStorage`, so it survives reloads and browser restarts on that browser profile.
+
+### 7.7 Deployment model
 
 Because the standalone file has no build step, deployment is: upload the file to a GitHub repository as `index.html`, then enable GitHub Pages ("Deploy from a branch," root folder). The live site is a static file server; all "backend" behavior (AI calls, data storage) happens via the two external services described above (Cloudflare Worker, Firestore), not via anything hosted alongside the HTML file itself.
 
@@ -350,7 +380,7 @@ Two independent icon sets exist (see §7.1):
 - **Vite/jsx version:** `lucide-react` — `Calendar`, `Camera`, `Type`, `Plus`, `Check`, `X`, `Clock`, `MapPin`, `Loader2`, `Sparkles`, `ChevronLeft`, `ChevronRight`, `Trash2`, `ImagePlus`, `ClipboardList`, `CalendarClock`, `Flower2`, `BookOpen`, `Search`, `FileText`.
 - **Standalone HTML version:** a local, dependency-free set —
   - Emoji-based (decorative, non-interactive contexts): 📅 Calendar, 📷 Camera, 📝 Type, 🕐 Clock, 📍 MapPin, ✨ Sparkles, 🗑️ Trash2, 🖼️ ImagePlus, 📋 ClipboardList, ⏰ CalendarClock, 🌸 Flower2, 📓 BookOpen.
-  - Hand-rolled SVG (interactive, need `currentColor`/hover-state support): Plus, Check, X, ChevronLeft, ChevronRight.
+  - Hand-rolled SVG (interactive, need `currentColor`/hover-state support): Plus, Check, X, Search, ChevronLeft, ChevronRight.
   - CSS-spinner (no icon asset): Loader2, rendered as a bordered circle with `animate-spin`.
 
 ### 8.5 Layout conventions
@@ -368,8 +398,9 @@ Two independent icon sets exist (see §7.1):
 | Concern | Current approach | Trade-off |
 |---|---|---|
 | Anthropic API key exposure | Held server-side in a Cloudflare Worker secret, never shipped to the browser | None significant — this is the standard safe pattern |
-| Firestore data access | A single open rule (`allow read, write: if true`) scoped to exactly one document path (`family_data/board`) | Anyone who discovers the exact Firebase project ID could theoretically read/write that one document. No authentication exists. Accepted as reasonable for a low-stakes personal family tool; flagged to the user as an area to revisit (e.g. Firebase Authentication) if higher assurance is wanted later |
-| Site-level access control | None — whoever has the GitHub Pages URL can open the app | The repository must be public for free-tier GitHub Pages, so the deployed HTML (including the visible `PROXY_URL` and `FIREBASE_PROJECT_ID` constants) is technically viewable by anyone who finds the URL, though the Worker still guards the actual API key |
+| Firestore data access | Requests include the signed-in user's Firebase ID token; authorization is enforced by Firestore security rules | The deployed HTML contains the Firebase project ID and Web API key, which are identifiers rather than secrets. Rules must be configured to restrict reads/writes to authenticated users |
+| Session persistence | The refresh token is stored in `localStorage` only when the user enables **Keep me signed in** | Any script running on the same origin could access it; do not use this pattern for high-sensitivity data without a stronger backend/session design |
+| Site-level access control | The app requires Firebase email/password authentication before showing the board | The repository can remain public, but anyone with a registered account can access the shared board; there are no roles or per-user data partitions |
 | Data at rest | Firestore's own infrastructure; no additional encryption layer added by the app | Standard Google Cloud protections apply; no extra app-level encryption |
 
 ---
@@ -380,7 +411,7 @@ Two independent icon sets exist (see §7.1):
 2. **Last-write-wins** — if both users edit at the exact same moment, whichever save lands last on the server overwrites the other silently. No merge or conflict warning.
 3. **No offline queueing** — if a save fails (e.g. no network), it's silently dropped rather than retried once connectivity returns; the local UI still reflects the change until a future poll overwrites it with the last successfully-synced remote state.
 4. **No editing of confirmed entries** — once an event/notice/homework item is confirmed, it can only be deleted, not edited in place; corrections require deleting and re-adding.
-5. **No authentication** — see §9.
+5. **Limited authorization model** — authentication is email/password only; there are no roles, invitations, password-reset UI, or per-family data partitions.
 6. **AI extraction is not free** — each Extract call costs a small amount via the Anthropic API (routed through the user's own Cloudflare Worker and API key).
 7. **Attachments aren't retained** — photos/PDFs used for extraction are only held in memory during the capture flow; the original file isn't stored or attachable to the resulting entry.
 8. **Single shared board** — the data model assumes one household sharing one document; it does not support multiple separate family groups or per-child boards.
@@ -390,7 +421,7 @@ Two independent icon sets exist (see §7.1):
 
 ## 11. Future Enhancements (not yet built)
 
-- Firebase Authentication to restrict the shared board to specific logged-in users.
+- Password reset, account creation, and invited-user management flows.
 - True real-time sync via Firestore's SDK listeners (`onSnapshot`) instead of polling, once the app moves off the REST-only, dependency-free constraint.
 - In-place editing of confirmed events/notices/homework.
 - Push notifications / reminders ahead of event dates.

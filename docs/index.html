@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Little Missy's Board (build: v4-search-files)</title>
+<title>Little Missy's Board (build: v5-auth)</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
@@ -108,18 +108,50 @@ const BookOpen = (p) => <Emoji {...p}>📓</Emoji>;
 
 // ---- Set this to your Cloudflare Worker URL to enable the AI extraction feature outside Claude ----
 const PROXY_URL = "https://school-calendar-proxy.gayathri-shanbhag.workers.dev/"; // e.g. "https://your-worker-name.your-subdomain.workers.dev"
-
 // ---- Fill this in with your own Firebase project ID to enable shared, persistent sync ----
+// (See setup steps in our conversation. Leave blank to keep using local-only, in-memory data.)
 const FIREBASE_PROJECT_ID = "little-missy-board";
+
+// ---- Fill this in with your Firebase Web API Key to enable sign-in ----
+// (Firebase Console -> Project Settings -> General -> "Web API Key")
+const FIREBASE_API_KEY = "AIzaSyBhEwXi0yKkpYqqzOV82yuRLynkfVymNBw";
+const AUTH_STORAGE_KEY = "little-missy-board-auth";
 
 const FIRESTORE_DOC_URL = FIREBASE_PROJECT_ID
   ? `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/family_data/board`
   : null;
 
-async function loadSharedState() {
+async function signIn(email, password) {
+  const res = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, returnSecureToken: true }),
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error?.message || "Sign in failed");
+  return data; // { idToken, refreshToken, email, expiresIn, ... }
+}
+
+async function refreshIdToken(refreshToken) {
+  const res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=refresh_token&refresh_token=${refreshToken}`,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error("Refresh failed");
+  return { idToken: data.id_token, refreshToken: data.refresh_token };
+}
+
+async function loadSharedState(idToken) {
   if (!FIRESTORE_DOC_URL) return null;
   try {
-    const res = await fetch(FIRESTORE_DOC_URL);
+    const res = await fetch(FIRESTORE_DOC_URL, {
+      headers: idToken ? { Authorization: `Bearer ${idToken}` } : {},
+    });
     if (!res.ok) return null;
     const json = await res.json();
     const raw = json?.fields?.data?.stringValue;
@@ -129,12 +161,15 @@ async function loadSharedState() {
   }
 }
 
-async function saveSharedState(events, notices, homeworkLog) {
+async function saveSharedState(events, notices, homeworkLog, idToken) {
   if (!FIRESTORE_DOC_URL) return;
   try {
     await fetch(`${FIRESTORE_DOC_URL}?updateMask.fieldPaths=data`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+      },
       body: JSON.stringify({
         fields: { data: { stringValue: JSON.stringify({ events, notices, homeworkLog }) } },
       }),
@@ -143,6 +178,7 @@ async function saveSharedState(events, notices, homeworkLog) {
     // offline or not configured yet — data still works locally, just won't sync
   }
 }
+
 
 const CATEGORY_STYLES = {
   School: { dot: "bg-orange-700", text: "text-orange-800", bg: "bg-orange-100", border: "border-orange-700" },
@@ -287,10 +323,90 @@ function SchoolCalendarApp() {
   const [searchQuery, setSearchQuery] = useState("");
   const fileInputRef = useRef(null);
 
+  // ---- Auth state ----
+  const [authToken, setAuthToken] = useState(null);
+  const [authRefreshToken, setAuthRefreshToken] = useState(null);
+  const [authEmail, setAuthEmail] = useState("");
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [keepSignedIn, setKeepSignedIn] = useState(true);
+  const [authRestoring, setAuthRestoring] = useState(true);
+  const [loginError, setLoginError] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
+    async function restoreAuth() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || "null");
+        if (!saved?.refreshToken) return;
+        const { idToken, refreshToken } = await refreshIdToken(saved.refreshToken);
+        if (cancelled) return;
+        setAuthToken(idToken);
+        setAuthRefreshToken(refreshToken);
+        setAuthEmail(saved.email || "");
+        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ refreshToken, email: saved.email || "" }));
+      } catch (e) {
+        localStorage.removeItem(AUTH_STORAGE_KEY);
+      } finally {
+        if (!cancelled) setAuthRestoring(false);
+      }
+    }
+    restoreAuth();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoginError("");
+    setLoginLoading(true);
+    try {
+      const data = await signIn(loginEmail.trim(), loginPassword);
+      setAuthToken(data.idToken);
+      setAuthRefreshToken(data.refreshToken);
+      setAuthEmail(data.email);
+      if (keepSignedIn) {
+        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ refreshToken: data.refreshToken, email: data.email }));
+      } else {
+        localStorage.removeItem(AUTH_STORAGE_KEY);
+      }
+      setLoginPassword("");
+    } catch (err) {
+      setLoginError("Couldn't sign in — check the email and password.");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    setAuthToken(null);
+    setAuthRefreshToken(null);
+    setAuthEmail("");
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+  };
+
+  // Refresh the ID token periodically (it expires after ~1 hour)
+  useEffect(() => {
+    if (!authRefreshToken) return;
+    const interval = setInterval(async () => {
+      try {
+        const { idToken, refreshToken } = await refreshIdToken(authRefreshToken);
+        setAuthToken(idToken);
+        setAuthRefreshToken(refreshToken);
+      } catch (e) {
+        // refresh failed silently; user will be prompted to sign in again if a save/load fails
+      }
+    }, 50 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [authRefreshToken]);
+
+  useEffect(() => {
+    if (!authToken) return;
+    let cancelled = false;
     async function refresh() {
-      const remote = await loadSharedState();
+      const remote = await loadSharedState(authToken);
       if (remote && !cancelled) {
         setEvents(remote.events || []);
         setNotices(remote.notices || []);
@@ -303,13 +419,13 @@ function SchoolCalendarApp() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [authToken]);
 
   const persist = (nextEvents, nextNotices, nextHomework) => {
     setEvents(nextEvents);
     setNotices(nextNotices);
     setHomeworkLog(nextHomework);
-    saveSharedState(nextEvents, nextNotices, nextHomework);
+    saveSharedState(nextEvents, nextNotices, nextHomework, authToken);
   };
 
   const goPrevMonth = () => setCurrentMonth((prev) => { const d = new Date(prev); d.setMonth(d.getMonth() - 1); return d; });
@@ -456,6 +572,64 @@ function SchoolCalendarApp() {
     return acc;
   }, {});
 
+  if (authRestoring) {
+    return <div className="min-h-screen bg-orange-50 flex items-center justify-center text-orange-700"><Loader2 size={22} /></div>;
+  }
+
+  if (!authToken) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-orange-50 via-amber-50 to-stone-50 flex items-center justify-center px-6">
+        <style>{`@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@1,600&family=Nunito:wght@400;600;700&display=swap'); .font-display{font-family:'Playfair Display',serif; font-style:italic;} .font-body{font-family:'Nunito',sans-serif;}`}</style>
+        <div className="w-full max-w-sm font-body">
+          <div className="text-center mb-6">
+            <div className="bg-orange-700 text-orange-50 rounded-full p-3 inline-flex mb-3">
+              <Flower2 size={24} />
+            </div>
+            <h1 className="font-body text-2xl text-orange-950">Little Missy's Board</h1>
+            <p className="text-stone-500 text-sm mt-1">Sign in to see your family's board</p>
+          </div>
+          <form onSubmit={handleLogin} className="bg-white rounded-2xl border border-orange-100 p-5 space-y-3 shadow-sm">
+            <input
+              type="email"
+              required
+              autoFocus
+              value={loginEmail}
+              onChange={(e) => setLoginEmail(e.target.value)}
+              placeholder="Email"
+              className="w-full text-sm border border-orange-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-orange-400"
+            />
+            <input
+              type="password"
+              required
+              value={loginPassword}
+              onChange={(e) => setLoginPassword(e.target.value)}
+              placeholder="Password"
+              className="w-full text-sm border border-orange-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-orange-400"
+            />
+            <label className="flex items-center gap-2 text-xs text-stone-600">
+              <input
+                type="checkbox"
+                checked={keepSignedIn}
+                onChange={(e) => setKeepSignedIn(e.target.checked)}
+                className="accent-orange-700"
+              />
+              Keep me signed in
+            </label>
+            {loginError && <p className="text-rose-600 text-xs">{loginError}</p>}
+            <button
+              type="submit"
+              disabled={loginLoading}
+              className="w-full bg-orange-700 hover:bg-orange-800 disabled:opacity-60 text-white font-medium py-2.5 rounded-xl text-sm flex items-center justify-center gap-2"
+            >
+              {loginLoading && <Loader2 size={14} />}
+              {loginLoading ? "Signing in..." : "Sign in"}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-orange-50 via-amber-50 to-stone-50 flex justify-center">
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@1,600&family=Nunito:wght@400;600;700&display=swap'); .font-display{font-family:'Playfair Display',serif; font-style:italic;} .font-body{font-family:'Nunito',sans-serif;}`}</style>
@@ -471,6 +645,9 @@ function SchoolCalendarApp() {
                 {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
               </p>
               <h1 className="font-body text-xl tracking-wide text-orange-950 leading-tight">Little Missy's Board</h1>
+              <button onClick={handleLogout} className="text-[10px] text-orange-700/50 underline underline-offset-2 mt-0.5">
+                {authEmail} · Sign out
+              </button>
             </div>
             <button
               onClick={() => {
