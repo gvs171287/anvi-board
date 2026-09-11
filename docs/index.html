@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Little Missy's Board (build: no-esm-v3)</title>
+<title>Little Missy's Board (build: v4-search-files)</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
@@ -79,6 +79,14 @@ function X({ size = 20, strokeWidth = 1.8, className = "" }) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" className={className}>
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+function Search({ size = 20, strokeWidth = 1.8, className = "" }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <circle cx="11" cy="11" r="7" />
+      <line x1="16.5" y1="16.5" x2="21" y2="21" />
     </svg>
   );
 }
@@ -275,6 +283,8 @@ function SchoolCalendarApp() {
     return d;
   });
   const [selectedDate, setSelectedDate] = useState(todayISO());
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -305,6 +315,32 @@ function SchoolCalendarApp() {
   const goPrevMonth = () => setCurrentMonth((prev) => { const d = new Date(prev); d.setMonth(d.getMonth() - 1); return d; });
   const goNextMonth = () => setCurrentMonth((prev) => { const d = new Date(prev); d.setMonth(d.getMonth() + 1); return d; });
 
+  const jumpToDate = (iso) => {
+    const d = new Date(iso + "T00:00:00");
+    d.setDate(1);
+    setCurrentMonth(d);
+    setSelectedDate(iso);
+    setTab("agenda");
+    setSearchOpen(false);
+    setSearchQuery("");
+  };
+
+  const matchesQuery = (text) => text && text.toLowerCase().includes(searchQuery.trim().toLowerCase());
+
+  const searchResults = searchQuery.trim()
+    ? [
+        ...events
+          .filter((e) => matchesQuery(e.title) || matchesQuery(e.location))
+          .map((e) => ({ kind: "event", ...e })),
+        ...notices
+          .filter((n) => matchesQuery(n.title) || matchesQuery(n.summary))
+          .map((n) => ({ kind: "notice", ...n })),
+        ...homeworkLog
+          .filter((h) => matchesQuery(h.title) || matchesQuery(h.summary))
+          .map((h) => ({ kind: "homework", ...h })),
+      ].sort((a, b) => (a.date || "").localeCompare(b.date || ""))
+    : [];
+
   const resetCapture = () => {
     setPastedText("");
     setImages([]);
@@ -315,7 +351,11 @@ function SchoolCalendarApp() {
   const handleImageSelect = (e) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-    const next = files.map((file) => ({ file, preview: URL.createObjectURL(file) }));
+    const next = files.map((file) => ({
+      file,
+      isPdf: file.type === "application/pdf",
+      preview: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
+    }));
     setImages((prev) => [...prev, ...next]);
     e.target.value = "";
   };
@@ -338,17 +378,19 @@ function SchoolCalendarApp() {
         blocks = [{ type: "text", text: pastedText }];
       } else {
         if (!images.length) {
-          setError("Choose at least one photo first.");
+          setError("Choose at least one photo or file first.");
           setLoading(false);
           return;
         }
-        const imageBlocks = await Promise.all(
-          images.map(async ({ file }) => {
+        blocks = await Promise.all(
+          images.map(async ({ file, isPdf }) => {
             const base64 = await fileToBase64(file);
+            if (isPdf) {
+              return { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } };
+            }
             return { type: "image", source: { type: "base64", media_type: file.type || "image/jpeg", data: base64 } };
           })
         );
-        blocks = imageBlocks;
       }
       const results = await callClaude(blocks, mode === "homework" ? "homework" : "general");
       if (!results.length) {
@@ -424,17 +466,77 @@ function SchoolCalendarApp() {
             <div className="bg-orange-700 text-orange-50 rounded-full p-1.5">
               <Flower2 size={16} />
             </div>
-            <div>
+            <div className="flex-1 min-w-0">
               <p className="text-xs uppercase tracking-widest text-orange-700/70 font-semibold">
                 {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
               </p>
               <h1 className="font-body text-xl tracking-wide text-orange-950 leading-tight">Little Missy's Board</h1>
             </div>
+            <button
+              onClick={() => {
+                setSearchOpen((prev) => !prev);
+                if (searchOpen) setSearchQuery("");
+              }}
+              className={`p-2 rounded-full ${searchOpen ? "bg-orange-700 text-white" : "text-orange-700 hover:bg-orange-100"}`}
+            >
+              {searchOpen ? <X size={18} /> : <Search size={18} />}
+            </button>
           </div>
+          {searchOpen && (
+            <input
+              autoFocus
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search events, notices, homework..."
+              className="w-full mt-3 rounded-xl border border-orange-200 px-3 py-2 text-sm text-stone-700 focus:outline-none focus:ring-2 focus:ring-orange-400"
+            />
+          )}
         </div>
 
         {/* Main content */}
         <div className="flex-1 px-5 pt-4 pb-24 overflow-y-auto">
+          {searchOpen && searchQuery.trim() ? (
+            <div className="space-y-2">
+              {searchResults.length === 0 && (
+                <p className="text-stone-500 text-sm text-center py-10">No matches for "{searchQuery}".</p>
+              )}
+              {searchResults.map((r) => {
+                const badge =
+                  r.kind === "event"
+                    ? { label: r.category || "Event", cls: (CATEGORY_STYLES[r.category] || CATEGORY_STYLES.Other).bg + " " + (CATEGORY_STYLES[r.category] || CATEGORY_STYLES.Other).text }
+                    : r.kind === "notice"
+                    ? { label: r.category || "Notice", cls: (NOTICE_CATEGORY_STYLES[r.category] || NOTICE_CATEGORY_STYLES.Info).bg + " " + (NOTICE_CATEGORY_STYLES[r.category] || NOTICE_CATEGORY_STYLES.Info).text }
+                    : { label: "Homework", cls: "bg-red-50 text-red-700" };
+                return (
+                  <button
+                    key={`${r.kind}-${r.id}`}
+                    onClick={() => {
+                      if (r.kind === "notice") {
+                        setTab("notices");
+                        setSearchOpen(false);
+                        setSearchQuery("");
+                      } else {
+                        jumpToDate(r.date);
+                      }
+                    }}
+                    className="w-full text-left bg-white rounded-2xl p-3.5 border border-orange-100 shadow-sm flex items-start gap-3"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-stone-800 text-sm">{r.title || "Homework"}</p>
+                      {(r.summary || r.location) && (
+                        <p className="text-xs text-stone-500 mt-1 leading-relaxed">{r.summary || r.location}</p>
+                      )}
+                      <div className="flex items-center gap-2 mt-2">
+                        <span className={`inline-block text-[11px] font-medium px-2 py-0.5 rounded-full ${badge.cls}`}>{badge.label}</span>
+                        {r.date && <span className="text-[11px] text-stone-400">{formatDateLabel(r.date)}</span>}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <>
           {tab === "agenda" && (
             <div>
               <div className="flex items-center justify-between mb-3">
@@ -677,7 +779,7 @@ function SchoolCalendarApp() {
                       <input
                         ref={fileInputRef}
                         type="file"
-                        accept="image/*"
+                        accept="image/*,application/pdf"
                         multiple
                         onChange={handleImageSelect}
                         className="hidden"
@@ -686,8 +788,15 @@ function SchoolCalendarApp() {
                         <div>
                           <div className="grid grid-cols-3 gap-2">
                             {images.map((img, i) => (
-                              <div key={img.preview} className="relative aspect-square">
-                                <img src={img.preview} alt={`Page ${i + 1}`} className="w-full h-full object-cover rounded-xl border border-orange-100" />
+                              <div key={i} className="relative aspect-square">
+                                {img.isPdf ? (
+                                  <div className="w-full h-full rounded-xl border border-orange-100 bg-orange-50 flex flex-col items-center justify-center gap-1 px-1">
+                                    <FileText size={22} className="text-orange-700" strokeWidth={1.5} />
+                                    <span className="text-[9px] text-orange-700 text-center truncate w-full">{img.file.name}</span>
+                                  </div>
+                                ) : (
+                                  <img src={img.preview} alt={`Page ${i + 1}`} className="w-full h-full object-cover rounded-xl border border-orange-100" />
+                                )}
                                 <button
                                   onClick={() => removeImage(i)}
                                   className="absolute -top-1.5 -right-1.5 bg-orange-700 text-white rounded-full p-0.5 shadow"
@@ -708,7 +817,7 @@ function SchoolCalendarApp() {
                             </button>
                           </div>
                           <p className="text-xs text-orange-300 mt-2">
-                            {images.length} photo{images.length > 1 ? "s" : ""} selected — these'll be read together.
+                            {images.length} file{images.length > 1 ? "s" : ""} selected — these'll be read together.
                           </p>
                         </div>
                       ) : (
@@ -717,7 +826,7 @@ function SchoolCalendarApp() {
                           className="w-full border-2 border-dashed border-orange-200 rounded-xl py-10 flex flex-col items-center gap-2 text-orange-300"
                         >
                           <Camera size={24} strokeWidth={1.5} />
-                          <span className="text-sm">Tap to choose one or more photos</span>
+                          <span className="text-sm">Tap to choose photos or PDFs</span>
                         </button>
                       )}
                     </div>
@@ -867,6 +976,8 @@ function SchoolCalendarApp() {
                 </div>
               )}
             </div>
+          )}
+            </>
           )}
         </div>
 
